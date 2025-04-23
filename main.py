@@ -23,9 +23,11 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 class ImageProcessing(StatesGroup):
     waiting_for_images = State()
 
+
 def ensure_dir_exists(dir_path):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
+
 
 # async def get_qwen_text_from_image(image_path: str):
 #     messages = [{
@@ -67,6 +69,7 @@ def image_to_base64(image_path: str):
     except Exception as e:
         return None
 
+
 async def get_openai_text_from_image(image_path: str):
     base64_image = image_to_base64(image_path)
     if not base64_image:
@@ -77,7 +80,8 @@ async def get_openai_text_from_image(image_path: str):
             "role": "user",
             "content": [
                 {
-                    "type": "input_text", "text": "Извлеки весь текст с этого изображения рукописного конспекта. Постарайся сохранить структуру, абзацы и переносы строк, как в оригинале."
+                    "type": "input_text",
+                    "text": "Извлеки весь текст с этого изображения рукописного конспекта. Постарайся сохранить структуру, абзацы и переносы строк, как в оригинале."
                 },
                 {
                     "type": "input_image",
@@ -93,7 +97,6 @@ async def get_openai_text_from_image(image_path: str):
             messages=messages,
         )
 
-
         if response.choices and response.choices[0].message and response.choices[0].message.content:
             extracted_text = response.choices[0].message.content.strip()
             return extracted_text
@@ -107,10 +110,10 @@ def create_word_document(text: str, filename: str):
     try:
         document = Document()
         for paragraph_text in text.split('\n'):
-             if paragraph_text.strip():
-                 document.add_paragraph(paragraph_text)
-             else:
-                 document.add_paragraph()
+            if paragraph_text.strip():
+                document.add_paragraph(paragraph_text)
+            else:
+                document.add_paragraph()
 
         ensure_dir_exists(TEMP_DOC_FOLDER)
         doc_path = os.path.join(TEMP_DOC_FOLDER, filename)
@@ -118,6 +121,7 @@ def create_word_document(text: str, filename: str):
         return doc_path
     except Exception as e:
         return None
+
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -139,11 +143,12 @@ async def cmd_start(message: Message, state: FSMContext):
                 "Отправь мне одну или несколько картинок твоего конспекта. "
                 "Когда закончишь, нажми кнопку 'Готово ✅' или отправь команду /done, "
                 "и я переведу их в текст и пришлю Word-файл."
-        )
+            )
         await state.set_state(ImageProcessing.waiting_for_images)
         await state.update_data(image_files=[])
     except:
         pass
+
 
 @dp.message(ImageProcessing.waiting_for_images, F.photo)
 async def handle_photos(message: Message, state: FSMContext):
@@ -161,22 +166,20 @@ async def handle_photos(message: Message, state: FSMContext):
 
     await state.update_data(image_files=image_files)
 
-
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="Готово ✅", callback_data="process_images")]
     ])
 
-
     try:
         await message.reply(
-        f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
-        reply_markup=keyboard
+            f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
+            reply_markup=keyboard
         )
     except Exception as e:
-              await message.reply(
-                 f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
-                 reply_markup=keyboard
-             )
+        await message.reply(
+            f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
+            reply_markup=keyboard
+        )
 
 
 @dp.message(ImageProcessing.waiting_for_images, F.text == "/done")
@@ -195,12 +198,14 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
     image_files = user_data.get("image_files", [])
 
     if not image_files:
-        await message_or_callback_message.answer("Ты не отправил ни одного изображения. Отправь фото и потом нажми 'Готово ✅'.")
+        await message_or_callback_message.answer(
+            "Ты не отправил ни одного изображения. Отправь фото и потом нажми 'Готово ✅'.")
         return
 
     await state.clear()
 
-    processing_message = await message_or_callback_message.answer(f"Получено {len(image_files)} фото. Начинаю распознавание текста... 🧠")
+    processing_message = await message_or_callback_message.answer(
+        f"Получено {len(image_files)} фото. Начинаю распознавание текста... 🧠")
 
     all_extracted_text = []
     temp_files_to_delete = []
@@ -208,7 +213,7 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
 
     for i, file_id in enumerate(image_files):
         try:
-            await processing_message.edit_text(f"Обрабатываю фото {i+1} из {len(image_files)}...")
+            await processing_message.edit_text(f"Обрабатываю фото {i + 1} из {len(image_files)}...")
             file_info = await bot.get_file(file_id)
             file_path = file_info.file_path
             temp_image_path = os.path.join(TEMP_IMAGE_FOLDER, f"{message_or_callback_message.chat.id}_{file_id}.jpeg")
@@ -221,9 +226,9 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
             if extracted_text:
                 all_extracted_text.append(extracted_text)
             else:
-                all_extracted_text.append(f"[Не удалось распознать текст на изображении {i+1}]")
+                all_extracted_text.append(f"[Не удалось распознать текст на изображении {i + 1}]")
         except Exception as e:
-            all_extracted_text.append(f"[Ошибка при обработке изображения {i+1}]")
+            all_extracted_text.append(f"[Ошибка при обработке изображения {i + 1}]")
         finally:
             pass
 
@@ -236,7 +241,8 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
     if doc_path:
         try:
             input_file = FSInputFile(doc_path, filename=f"Твой_конспект_{message_or_callback_message.chat.id}.docx")
-            await message_or_callback_message.answer_document(input_file, caption="Готово! Вот твой конспект в формате Word.")
+            await message_or_callback_message.answer_document(input_file,
+                                                              caption="Готово! Вот твой конспект в формате Word.")
             try:
                 os.remove(doc_path)
             except OSError as e:
@@ -245,7 +251,7 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
         except Exception as e:
             await message_or_callback_message.answer("Не смог отправить Word файл. Попробуй еще раз позже.")
         finally:
-             await processing_message.delete() # Удаляем сообщение "Создаю Word..."
+            await processing_message.delete()  # Удаляем сообщение "Создаю Word..."
 
     else:
         await processing_message.edit_text("Не удалось создать Word файл. Отправляю текст как сообщение:")
@@ -258,6 +264,7 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
             os.remove(f_path)
         except OSError as e:
             pass
+
 
 @dp.message(ImageProcessing.waiting_for_images)
 async def handle_other_messages_while_waiting(message: Message, state: FSMContext):
@@ -278,6 +285,7 @@ async def main():
     ensure_dir_exists(TEMP_DOC_FOLDER)
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
