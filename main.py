@@ -1,245 +1,283 @@
 import asyncio
 import os
 
+import base64
+from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandObject
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.filters.callback_data import CallbackData
+from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
-from aiogram.types.input_media_photo import InputMediaPhoto
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
-from PIL import Image
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, FSInputFile, BufferedInputFile
+from docx import Document
+
+from config import TG_TOKEN, OPENAI_API_KEY, DB_NAME, TEMP_IMAGE_FOLDER, TEMP_DOC_FOLDER, OPENAI_VISION_MODEL
 from data import db_session
-from typing import Optional
-
-from config.config import TG_TOKEN_DEV
 from data.user import User
-from config.kb import (
-    keyboard_user
-)
 
-__all__ = []
-
-bot = Bot(TG_TOKEN_DEV)
+bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
 
-users_in_support = []
-in_time = []
-in_answer = [False, 0]
-
-flag_pattern_name = False
-flag_view_pattern = False
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
-class PhotoState(StatesGroup):
-    waiting_for_photo: State = State()
-    waiting_for_photo2: State = State()
-    waiting_for_photo3: State = State()
+class ImageProcessing(StatesGroup):
+    waiting_for_images = State()
+
+def ensure_dir_exists(dir_path):
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+
+# async def get_qwen_text_from_image(image_path: str):
+#     messages = [{
+#         "role": "user",
+#         "content": [
+#             {"image": f"file://{os.path.abspath(image_path)}"},
+#             {"text": "Извлеки весь текст с этого изображения конспекта. Сохрани форматирование, насколько это возможно."}
+#         ]
+#     }]
+#     try:
+#         logging.info(f"Отправка запроса в Qwen API для файла: {image_path}")
+#         response = await dashscope.MultiModalConversation.aCall(
+#             model='qwen-vl-plus',
+#             messages=messages
+#         )
+#
+#         if response.status_code == HTTPStatus.OK:
+#             logging.info(f"Qwen API ответил успешно для файла: {image_path}")
+#             content = response.output.choices[0].message.content
+#             if isinstance(content, list) and len(content) > 0 and 'text' in content[0]:
+#                 return content[0]['text'].strip()
+#             else:
+#                 logging.warning(f"Неожиданная структура ответа от Qwen: {response}")
+#                 return None
+#         else:
+#             logging.error(f'Ошибка Qwen API: Код={response.code}, Сообщение={response.message}, RequestId={response.request_id}')
+#             return None
+#
+#     except Exception as e:
+#         logging.exception(f"Исключение при вызове Qwen API для {image_path}: {e}")
+#         return None
 
 
-class DataForAnswer(CallbackData, prefix="fabnum"):
-    action: str
-    id: Optional[int] = None
+# --- Обработчики команд и сообщений ---
+def image_to_base64(image_path: str):
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except Exception as e:
+        return None
 
+async def get_openai_text_from_image(image_path: str):
+    base64_image = image_to_base64(image_path)
+    if not base64_image:
+        return None
 
-def markup_for_admin_ans(user_id):
-    anser_admin_kb = InlineKeyboardBuilder()
-    anser_admin_kb.button(text='Ответить', callback_data=DataForAnswer(action="ok", id=user_id))
-    anser_admin_kb.button(text='Завершить диалог', callback_data=DataForAnswer(action="cancel", id=user_id))
-    anser_admin_kb.adjust(2)
-    return anser_admin_kb
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text", "text": "Извлеки весь текст с этого изображения рукописного конспекта. Постарайся сохранить структуру, абзацы и переносы строк, как в оригинале."
+                },
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{base64_image}"
+                }
+            ]
+        }
+    ]
 
-
-def del_last_pattern(message):
-    global flag_pattern_name
-    if flag_pattern_name:
-        flag_pattern_name = False
-        patterns_user = DB_SESS.query(Pattern).filter(Pattern.user_id == message.from_user.id)
-        last_pattern_id = max(i.pattern_id for i in patterns_user)
-        last_pattern_user = DB_SESS.query(Pattern).filter(Pattern.pattern_id == last_pattern_id)
-        for p in last_pattern_user:
-            if not p.pattern_name:
-                DB_SESS.delete(p)
-        DB_SESS.commit()
-
-
-def null_flags():
-    global flag_view_pattern
-    flag_view_pattern = False
-
-
-def dir_cleaning(directory):
-    for filename in os.listdir(directory):
-        filepath = os.path.join(directory, filename)
-        try:
-            if os.path.isfile(filepath):
-                os.remove(filepath)
-        except Exception as e:
-            print(f"Ошибка при удалении файла {filename}: {e}")
-
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message) -> Message:
-    del_last_pattern(message)
-    null_flags()
-    if message.chat.id not in [i.id for i in DB_SESS.query(User).all()]:
-        user = User(
-            id=message.chat.id,
-            full_name=message.from_user.full_name,
-            tg_name=message.chat.username
+    try:
+        response = await openai_client.chat.completions.create(
+            model=OPENAI_VISION_MODEL,
+            messages=messages,
         )
-        DB_SESS.add(user)
-        DB_SESS.commit()
-    text_answer = f"Привет {message.from_user.first_name}"
-    await message.answer(text_answer, reply_markup=keyboard_user)
 
 
-@dp.message(Command("help"))
-@dp.message(F.text == "Помощь")
-async def help(message: types.Message) -> Message:
-    await message.answer("Помощь")
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            extracted_text = response.choices[0].message.content.strip()
+            return extracted_text
+        else:
+            return None
+    except Exception as e:
+        return "[Произошла внутренняя ошибка при обработке изображения]"
 
 
-@dp.message(Command("menu"))
-@dp.message(F.text == "Меню")
-async def menu(message: types.Message) -> Message:
-    del_last_pattern(message)
-    null_flags()
-    await message.answer("Меню", reply_markup=keyboard_user)
+def create_word_document(text: str, filename: str):
+    try:
+        document = Document()
+        for paragraph_text in text.split('\n'):
+             if paragraph_text.strip():
+                 document.add_paragraph(paragraph_text)
+             else:
+                 document.add_paragraph()
+
+        ensure_dir_exists(TEMP_DOC_FOLDER)
+        doc_path = os.path.join(TEMP_DOC_FOLDER, filename)
+        document.save(doc_path)
+        return doc_path
+    except Exception as e:
+        return None
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    session = db_session.create_session()
+    try:
+        user = session.query(User).filter(User.id == message.from_user.id).first()
+        if not user:
+            user = User(
+                id=message.from_user.id,
+                full_name=message.from_user.full_name,
+                tg_name=message.from_user.username
+            )
+            session.add(user)
+            session.commit()
+        else:
+            await message.answer(
+                f"Привет, {message.from_user.first_name}! 👋\n\n"
+                "Отправь мне одну или несколько картинок твоего конспекта. "
+                "Когда закончишь, нажми кнопку 'Готово ✅' или отправь команду /done, "
+                "и я переведу их в текст и пришлю Word-файл."
+        )
+        await state.set_state(ImageProcessing.waiting_for_images)
+        await state.update_data(image_files=[])
+    except:
+        pass
+
+@dp.message(ImageProcessing.waiting_for_images, F.photo)
+async def handle_photos(message: Message, state: FSMContext):
+    if not message.photo:
+        await message.reply("Пожалуйста, отправьте изображение.")
+        return
+
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    user_data = await state.get_data()
+    image_files = user_data.get("image_files", [])
+
+    image_files.append(file_id)
+
+    await state.update_data(image_files=image_files)
 
 
-# Команда для обращения в поддержку
-@dp.message(Command("support"))
-@dp.message(F.text == "Обратная связь")
-async def support(message: types.Message):
-    del_last_pattern(message)
-    null_flags()
-    if message.from_user.id in [i.id for i in DB_SESS.query(User).filter(User.is_developer).all()]:
-        await message.reply("Вы являетесь админом и не можете задавать вопросы.")
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="Готово ✅", callback_data="process_images")]
+    ])
+
+
+    try:
+        await message.reply(
+        f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
+        reply_markup=keyboard
+        )
+    except Exception as e:
+              await message.reply(
+                 f"Фото {len(image_files)} принято! 👍 Отправляй еще или нажми 'Готово ✅'.",
+                 reply_markup=keyboard
+             )
+
+
+@dp.message(ImageProcessing.waiting_for_images, F.text == "/done")
+async def handle_done_command(message: Message, state: FSMContext):
+    await process_uploaded_images(message, state)
+
+
+@dp.callback_query(ImageProcessing.waiting_for_images, F.data == "process_images")
+async def handle_done_button(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer("Начинаю обработку...")
+    await process_uploaded_images(callback.message, state, is_callback=True)
+
+
+async def process_uploaded_images(message_or_callback_message: Message, state: FSMContext, is_callback: bool = False):
+    user_data = await state.get_data()
+    image_files = user_data.get("image_files", [])
+
+    if not image_files:
+        await message_or_callback_message.answer("Ты не отправил ни одного изображения. Отправь фото и потом нажми 'Готово ✅'.")
+        return
+
+    await state.clear()
+
+    processing_message = await message_or_callback_message.answer(f"Получено {len(image_files)} фото. Начинаю распознавание текста... 🧠")
+
+    all_extracted_text = []
+    temp_files_to_delete = []
+    ensure_dir_exists(TEMP_IMAGE_FOLDER)
+
+    for i, file_id in enumerate(image_files):
+        try:
+            await processing_message.edit_text(f"Обрабатываю фото {i+1} из {len(image_files)}...")
+            file_info = await bot.get_file(file_id)
+            file_path = file_info.file_path
+            temp_image_path = os.path.join(TEMP_IMAGE_FOLDER, f"{message_or_callback_message.chat.id}_{file_id}.jpeg")
+            temp_files_to_delete.append(temp_image_path)
+
+            await bot.download_file(file_path, temp_image_path)
+
+            extracted_text = await get_openai_text_from_image(temp_image_path)
+
+            if extracted_text:
+                all_extracted_text.append(extracted_text)
+            else:
+                all_extracted_text.append(f"[Не удалось распознать текст на изображении {i+1}]")
+        except Exception as e:
+            all_extracted_text.append(f"[Ошибка при обработке изображения {i+1}]")
+        finally:
+            pass
+
+    await processing_message.edit_text("Текст извлечен. Создаю Word документ... 📄")
+    final_text = "\n\n---\n\n".join(all_extracted_text)
+
+    doc_filename = f"konspekt_{message_or_callback_message.chat.id}_{message_or_callback_message.message_id}.docx"
+    doc_path = create_word_document(final_text, doc_filename)
+
+    if doc_path:
+        try:
+            input_file = FSInputFile(doc_path, filename=f"Твой_конспект_{message_or_callback_message.chat.id}.docx")
+            await message_or_callback_message.answer_document(input_file, caption="Готово! Вот твой конспект в формате Word.")
+            try:
+                os.remove(doc_path)
+            except OSError as e:
+                pass
+
+        except Exception as e:
+            await message_or_callback_message.answer("Не смог отправить Word файл. Попробуй еще раз позже.")
+        finally:
+             await processing_message.delete() # Удаляем сообщение "Создаю Word..."
+
     else:
-        if message.from_user.id not in users_in_support:
-            users_in_support.append(message.from_user.id)
-        await message.reply("Введите ваше сообщение для поддержки.")
+        await processing_message.edit_text("Не удалось создать Word файл. Отправляю текст как сообщение:")
+        max_length = 4096
+        for i in range(0, len(final_text), max_length):
+            await message_or_callback_message.answer(final_text[i:i + max_length])
+
+    for f_path in temp_files_to_delete:
+        try:
+            os.remove(f_path)
+        except OSError as e:
+            pass
+
+@dp.message(ImageProcessing.waiting_for_images)
+async def handle_other_messages_while_waiting(message: Message, state: FSMContext):
+    await message.reply("Пожалуйста, отправь мне фото конспекта или нажми 'Готово ✅' / отправь /done, если закончил.")
 
 
-@dp.message(Command("generate"))
-@dp.message(F.text == "")
-async def create_stickerpak(message: types.Message) -> Message:
-    del_last_pattern(message)
-    null_flags()
-    await message.answer(
-        ""
-    )
+@dp.message()
+async def handle_unknown_messages(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.reply("Я не понимаю эту команду. Используй /start, чтобы начать.")
 
 
-def create_folder_if_not_exists(folder_name):
-    if not os.path.exists(f"faceswap/patterns/{folder_name}"):
-        os.makedirs(f"faceswap/patterns/{folder_name}")
+# --- Запуск бота ---
+async def main():
+    db_session.global_init(DB_NAME)
+    ensure_dir_exists(TEMP_IMAGE_FOLDER)
+    ensure_dir_exists(TEMP_DOC_FOLDER)
 
-
-async def download_pattern(list_id, pattern_name):
-    for i in list_id:
-        image_info = await bot.get_file(i)
-        image_path = image_info.file_path
-
-        create_folder_if_not_exists(pattern_name)
-
-        output_sticker_path = f"faceswap/patterns/{pattern_name}/{i}.png"
-
-        await bot.download_file(image_path, output_sticker_path)
-
-        with Image.open(output_sticker_path) as img:
-            img.save(output_sticker_path)
-
-
-async def download_image(image_id):
-    image_info = await bot.get_file(image_id)
-    image_path = image_info.file_path
-
-    output_sticker_path = f"faceswap/inFace/{image_id}.png"
-
-    await bot.download_file(image_path, output_sticker_path)
-
-    with Image.open(output_sticker_path) as img:
-        img.save(output_sticker_path)
-
-
-# -------------------Администратор---------------------------
-@dp.message(Command("set_admin"))
-async def set_admin(
-        message: types.Message,
-        command: CommandObject,
-):
-    if DB_SESS.query(User).filter(User.id == message.from_user.id).first().is_developer:
-        if not command.args:
-            await message.answer("Вы не ввели никнейм пользователя")
-        U = DB_SESS.query(User).filter(User.tg_name == int(command.args)).first()
-        U.is_developer = 1
-        DB_SESS.commit()
-        await message.answer(f"Пользователь {U.tg_name} назначен администратором")
-    else:
-        await message.answer(f"У вас нет прав, чтобы использовать эту команду")
-
-
-# -------------------------Поддержка-----------------------------
-# @dp.message()
-# async def handle_message(message: types.Message):
-#     # Проверяем, обратился ли пользователь в поддержку
-#     global in_answer, flag_pattern_name, flag_view_pattern
-#
-#     if in_answer[0]:
-#         admin = DB_SESS.query(User).filter(User.id == message.from_user.id).first()
-#         admin.workload -= 1
-#         DB_SESS.commit()
-#         await bot.send_message(in_answer[1], message.text)
-#         await message.reply("Ответ отправлен пользователю")
-#         users_in_support.remove(in_answer[1])
-#         in_time.remove(in_answer[1])
-#         in_answer = [False, 0]
-#     elif message.from_user.id in users_in_support and message.from_user.id not in in_time:
-#         ##################
-#         developer_id = sorted(
-#             {i.id: i.workload for i in DB_SESS.query(User).filter(User.is_developer).all()}.items(),
-#             key=lambda x: x[1])[0][0]
-#         admin = DB_SESS.query(User).filter(User.id == developer_id).first()
-#         admin.workload += 1
-#         DB_SESS.commit()
-#         admin_message = f"Пользователь {message.from_user.first_name} задал вопрос: {message.text}"
-#         await bot.send_message(developer_id, admin_message, reply_markup=markup_for_admin_ans(message.from_user.id).as_markup())
-#         in_time.append(message.from_user.id)
-#         ##################
-#         await message.reply("Ваше сообщение было передано администратору. Ожидайте ответа.")
-#     elif message.from_user.id in in_time:
-#         await message.reply("Ваше сообщение было передано администратору. Ожидайте ответа.")
-#     else:
-#         await message.reply("Простите, я не понимаю вашего сообщения.")
-#
-#
-# @dp.callback_query(DataForAnswer.filter())
-# async def callbacks_num_change_fab(callback: types.CallbackQuery, callback_data: DataForAnswer):
-#     global in_answer
-#     if callback_data.action == "ok":
-#         await callback.message.edit_text(f"Напишите текст для ответа:")
-#         in_answer = [True, callback_data.id]
-#
-#     elif callback_data.action == "cancel":
-#         admin = DB_SESS.query(User).filter(User.id == callback_data.id).first()
-#         admin.workload -= 1
-#         DB_SESS.commit()
-#         await bot.send_message(callback_data.id, "Вопрос отклонён")
-#         await callback.message.edit_text(f"Вопрос отклонён")
-#         users_in_support.remove(callback_data.id)
-#         in_time.remove(callback_data.id)
-#     await callback.answer()
-# -----------------------------------------------------------------------------
-
-
-async def main() -> None:
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
-    db_session.global_init("db/db.db")
-    DB_SESS = db_session.create_session()
     asyncio.run(main())

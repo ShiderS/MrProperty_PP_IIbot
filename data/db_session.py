@@ -7,7 +7,6 @@ SqlAlchemyBase = dec.declarative_base()
 
 __factory = None
 
-
 def global_init(db_file):
     global __factory
 
@@ -21,12 +20,15 @@ def global_init(db_file):
     print(f"Подключение к базе данных по адресу {conn_str}")
 
     engine = sa.create_engine(conn_str, echo=False)
-    # echo отображение
     __factory = orm.sessionmaker(bind=engine)
+
 
     SqlAlchemyBase.metadata.create_all(engine)
 
 
 def create_session() -> Session:
     global __factory
+    if not __factory:
+         # Возможно, стоит выбросить исключение или попытаться инициализировать снова
+         raise RuntimeError("Database session factory is not initialized. Call global_init first.")
     return __factory()
