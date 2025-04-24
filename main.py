@@ -9,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, FSInputFile, BufferedInputFile
 from docx import Document
+from together import Together
 
 from config import TG_TOKEN, OPENAI_API_KEY, DB_NAME, TEMP_IMAGE_FOLDER, TEMP_DOC_FOLDER, OPENAI_VISION_MODEL
 from data import db_session
@@ -18,6 +19,30 @@ bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+client = Together(api_key=OPENAI_API_KEY)
+
+response = client.chat.completions.create(
+    model="Qwen/Qwen2-VL-72B-Instruct",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Распознай текст на фото"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://studfile.net/html/2706/132/html_cIRc0NvMni.aLWd/img-aNoHJl.png"
+                    }
+                }
+            ]
+        }
+    ]
+)
+print(response.choices[0].message.content)
 
 
 class ImageProcessing(StatesGroup):
