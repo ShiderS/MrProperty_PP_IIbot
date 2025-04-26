@@ -2,47 +2,23 @@ import asyncio
 import os
 
 import base64
-from openai import AsyncOpenAI
+from together import Together
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, FSInputFile, BufferedInputFile
 from docx import Document
-from together import Together
 
-from config import TG_TOKEN, OPENAI_API_KEY, DB_NAME, TEMP_IMAGE_FOLDER, TEMP_DOC_FOLDER, OPENAI_VISION_MODEL
+from config import TG_TOKEN, TOGETHER_API_KEY, DB_NAME, TEMP_IMAGE_FOLDER, TEMP_DOC_FOLDER, TOGETHER_VISION_MODEL, getDescriptionPrompt
 from data import db_session
 from data.user import User
 
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = Together(api_key=TOGETHER_API_KEY)
 
-client = Together(api_key=OPENAI_API_KEY)
-
-response = client.chat.completions.create(
-    model="Qwen/Qwen2-VL-72B-Instruct",
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Распознай текст на фото"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "https://studfile.net/html/2706/132/html_cIRc0NvMni.aLWd/img-aNoHJl.png"
-                    }
-                }
-            ]
-        }
-    ]
-)
-print(response.choices[0].message.content)
 
 
 class ImageProcessing(StatesGroup):
@@ -53,83 +29,49 @@ def ensure_dir_exists(dir_path):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
-
-# async def get_qwen_text_from_image(image_path: str):
-#     messages = [{
-#         "role": "user",
-#         "content": [
-#             {"image": f"file://{os.path.abspath(image_path)}"},
-#             {"text": "Извлеки весь текст с этого изображения конспекта. Сохрани форматирование, насколько это возможно."}
-#         ]
-#     }]
-#     try:
-#         logging.info(f"Отправка запроса в Qwen API для файла: {image_path}")
-#         response = await dashscope.MultiModalConversation.aCall(
-#             model='qwen-vl-plus',
-#             messages=messages
-#         )
-#
-#         if response.status_code == HTTPStatus.OK:
-#             logging.info(f"Qwen API ответил успешно для файла: {image_path}")
-#             content = response.output.choices[0].message.content
-#             if isinstance(content, list) and len(content) > 0 and 'text' in content[0]:
-#                 return content[0]['text'].strip()
-#             else:
-#                 logging.warning(f"Неожиданная структура ответа от Qwen: {response}")
-#                 return None
-#         else:
-#             logging.error(f'Ошибка Qwen API: Код={response.code}, Сообщение={response.message}, RequestId={response.request_id}')
-#             return None
-#
-#     except Exception as e:
-#         logging.exception(f"Исключение при вызове Qwen API для {image_path}: {e}")
-#         return None
-
-
 # --- Обработчики команд и сообщений ---
-def image_to_base64(image_path: str):
+def image_to_base64(image_path: str) -> str | None:
     try:
         with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            return encoded_string
     except Exception as e:
         return None
 
-
-async def get_openai_text_from_image(image_path: str):
+# --- Обработчики команд и сообщений ---
+async def get_togetherai_text_from_image(image_path: str):
     base64_image = image_to_base64(image_path)
     if not base64_image:
-        return None
+        return "[Ошибка: Не удалось закодировать изображение]"
 
     messages = [
         {
             "role": "user",
             "content": [
+                {"type": "text", "text": getDescriptionPrompt},
                 {
-                    "type": "input_text",
-                    "text": "Извлеки весь текст с этого изображения рукописного конспекта. Постарайся сохранить структуру, абзацы и переносы строк, как в оригинале."
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}",
+                    },
                 },
-                {
-                    "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{base64_image}"
-                }
-            ]
+            ],
         }
     ]
-
     try:
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_VISION_MODEL,
+        response = client.chat.completions.create(
+            model=TOGETHER_VISION_MODEL,
             messages=messages,
+            max_tokens=2048
         )
 
         if response.choices and response.choices[0].message and response.choices[0].message.content:
             extracted_text = response.choices[0].message.content.strip()
             return extracted_text
         else:
-            return None
+            return "[Ошибка: Не удалось извлечь текст из ответа API]"
     except Exception as e:
-        return "[Произошла внутренняя ошибка при обработке изображения]"
-
+        return "[Произошла ошибка при обработке изображения через API]"
 
 def create_word_document(text: str, filename: str):
     try:
@@ -246,7 +188,7 @@ async def process_uploaded_images(message_or_callback_message: Message, state: F
 
             await bot.download_file(file_path, temp_image_path)
 
-            extracted_text = await get_openai_text_from_image(temp_image_path)
+            extracted_text = await get_togetherai_text_from_image(temp_image_path)
 
             if extracted_text:
                 all_extracted_text.append(extracted_text)

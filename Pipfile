@@ -11,6 +11,7 @@ sqlalchemy-serializer = "*"
 pillow = "*"
 python-docx = "*"
 openai = "*"
+together = "*"
 
 [dev-packages]
 
